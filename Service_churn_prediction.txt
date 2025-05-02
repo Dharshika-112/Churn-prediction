@@ -1,0 +1,292 @@
+# ===== COMPLETE CUSTOMER CHURN PREDICTION SOLUTION =====
+# 📦 Import all necessary libraries
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import (classification_report, confusion_matrix, 
+                           roc_auc_score, accuracy_score, 
+                           precision_recall_curve, auc)
+from sklearn.ensemble import (RandomForestClassifier, GradientBoostingClassifier, 
+                            AdaBoostClassifier, VotingClassifier)
+from sklearn.svm import SVC
+from sklearn.naive_bayes import GaussianNB
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.linear_model import LogisticRegression
+from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import make_pipeline as make_imb_pipeline
+import xgboost as xgb
+import lightgbm as lgb
+import catboost as cb
+import warnings
+warnings.filterwarnings('ignore')
+
+# 🗂️ Load and inspect the dataset
+file_path = r"C:\Users\dsdha\Downloads\archive (2)\customer_churn_prediction_dataset.csv"
+try:
+    df = pd.read_csv(file_path)
+    print("✅ Dataset loaded successfully")
+    print(f"Shape: {df.shape}")
+except Exception as e:
+    print(f"❌ Error loading file: {e}")
+    raise
+
+# 🧹 Data Cleaning
+# Strip whitespace from column names
+df.columns = df.columns.str.strip()
+
+# Check for missing values
+print("\n=== Missing Values ===")
+print(df.isnull().sum())
+
+# 🎯 Define target variable - adjust column name if needed
+TARGET_COL = 'Churn'
+if TARGET_COL not in df.columns:
+    print(f"❌ Target column '{TARGET_COL}' not found. Available columns:")
+    print(df.columns.tolist())
+    raise ValueError("Target column not found")
+
+# 🔍 Analyze target distribution
+print("\n=== Target Distribution ===")
+target_counts = df[TARGET_COL].value_counts()
+print(target_counts)
+
+# Handle case where there's only one class
+if len(target_counts) < 2:
+    print("\n❌ Critical Error: Only one class present in target variable")
+    print("Possible solutions:")
+    print("1. Check if column is correctly identified as target")
+    print("2. Data may need relabeling")
+    print("3. Dataset might be flawed")
+    raise ValueError("Only one class in target variable")
+
+# 🛠️ Feature Engineering
+print("\n=== Feature Engineering ===")
+# Example feature engineering - modify based on your actual columns
+if 'Tenure' in df.columns:
+    df['Tenure_Group'] = pd.cut(df['Tenure'], bins=[0, 12, 24, 36, 48, 60, np.inf], 
+                               labels=['0-1', '1-2', '2-3', '3-4', '4-5', '5+'])
+    print("Created Tenure_Group feature")
+
+if 'MonthlyCharges' in df.columns and 'TotalCharges' in df.columns:
+    df['Value_Ratio'] = df['MonthlyCharges'] / (df['TotalCharges'].replace(0, 0.001) + 0.001)
+    print("Created Value_Ratio feature")
+
+# 🏷️ Identify feature types
+categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+# Remove target if it was mistakenly included
+if TARGET_COL in categorical_cols:
+    categorical_cols.remove(TARGET_COL)
+    
+numerical_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
+if TARGET_COL in numerical_cols:
+    numerical_cols.remove(TARGET_COL)
+
+print(f"\nCategorical features: {categorical_cols}")
+print(f"Numerical features: {numerical_cols}")
+
+#   Preprocessing pipelines
+numeric_transformer = Pipeline(steps=[
+    ('scaler', StandardScaler())
+])
+
+categorical_transformer = Pipeline(steps=[
+    ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+])
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', numeric_transformer, numerical_cols),
+        ('cat', categorical_transformer, categorical_cols)
+    ])
+
+# 🎯 Prepare X and y
+X = df.drop(TARGET_COL, axis=1)
+y = df[TARGET_COL]
+
+# 🧪 Train-test split with stratification
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y)
+
+# ⚖️ Handle class imbalance
+positive_count = sum(y_train == 1)
+negative_count = sum(y_train == 0)
+imbalance_ratio = negative_count / positive_count if positive_count > 0 else 0
+
+print(f"\n=== Class Imbalance ===")
+print(f"Positive samples (1): {positive_count}")
+print(f"Negative samples (0): {negative_count}")
+print(f"Imbalance ratio: {imbalance_ratio:.1f}:1")
+
+# 🚀 Define models with safe parameters
+models = {
+    "Logistic Regression": LogisticRegression(
+        class_weight='balanced', max_iter=1000, random_state=42),
+    "Random Forest": RandomForestClassifier(
+        class_weight='balanced_subsample', random_state=42),
+    "Gradient Boosting": GradientBoostingClassifier(random_state=42),
+    "AdaBoost": AdaBoostClassifier(random_state=42),
+    "SVM": SVC(
+        class_weight='balanced', probability=True, random_state=42),
+    "Naive Bayes": GaussianNB(),
+    "KNN": KNeighborsClassifier(),
+    "XGBoost": xgb.XGBClassifier(
+        scale_pos_weight=imbalance_ratio if positive_count > 0 else 1,
+        eval_metric='auc', random_state=42),
+    "LightGBM": lgb.LGBMClassifier(
+        class_weight='balanced', random_state=42),
+    "CatBoost": cb.CatBoostClassifier(
+        auto_class_weights='Balanced', verbose=False, random_state=42)
+}
+
+# 📊 Model evaluation function
+def evaluate_model(model, X_train, y_train, X_test, y_test, cv):
+    try:
+        # Create pipeline with preprocessing and SMOTE
+        pipeline = Pipeline([
+            ('preprocessor', preprocessor),
+            ('smote', SMOTE(
+                sampling_strategy='auto',
+                random_state=42,
+                k_neighbors=min(5, positive_count) if positive_count > 0 else 5),
+            ('classifier', model))
+        ])
+        
+        # Cross-validation
+        cv_scores = cross_val_score(
+            pipeline, X_train, y_train, 
+            cv=cv, scoring='roc_auc', n_jobs=-1)
+        
+        # Train model
+        pipeline.fit(X_train, y_train)
+        
+        # Predictions
+        y_pred = pipeline.predict(X_test)
+        y_proba = pipeline.predict_proba(X_test)[:, 1]
+        
+        # Metrics
+        metrics = {
+            'Accuracy': accuracy_score(y_test, y_pred),
+            'ROC-AUC': roc_auc_score(y_test, y_proba),
+            'CV ROC-AUC Mean': np.mean(cv_scores),
+            'CV ROC-AUC Std': np.std(cv_scores)
+        }
+        
+        # Classification report
+        report = classification_report(y_test, y_pred, output_dict=True)
+        metrics.update({
+            'Precision': report['1']['precision'],
+            'Recall': report['1']['recall'],
+            'F1-Score': report['1']['f1-score']
+        })
+        
+        return metrics, pipeline
+    
+    except Exception as e:
+        print(f"Error evaluating {type(model).__name__}: {e}")
+        return None, None
+
+# 📈 Evaluate all models
+results = []
+best_models = {}
+
+# Adjust CV strategy based on positive samples
+cv = StratifiedKFold(
+    n_splits=min(5, positive_count) if positive_count > 0 else 5,
+    shuffle=True, 
+    random_state=42)
+
+print("\n=== Model Evaluation ===")
+for name, model in models.items():
+    print(f"\nEvaluating {name}...")
+    metrics, pipeline = evaluate_model(model, X_train, y_train, X_test, y_test, cv)
+    
+    if metrics:
+        results.append({'Model': name, **metrics})
+        best_models[name] = pipeline
+        print(f"✅ Completed: ROC-AUC = {metrics['ROC-AUC']:.4f}")
+    else:
+        print(f"❌ Failed to evaluate {name}")
+
+# 📊 Results analysis
+if results:
+    results_df = pd.DataFrame(results).sort_values(by="ROC-AUC", ascending=False)
+    print("\n=== Model Performance Summary ===")
+    print(results_df[['Model', 'Accuracy', 'ROC-AUC', 'Precision', 'Recall', 'F1-Score']])
+    
+    # 📈 Visualization
+    plt.figure(figsize=(12, 8))
+    sns.barplot(data=results_df, x='ROC-AUC', y='Model', palette='viridis')
+    plt.title('Model ROC-AUC Comparison')
+    plt.xlabel('ROC-AUC Score')
+    plt.xlim(0, 1)
+    plt.tight_layout()
+    plt.show()
+else:
+    print("\n❌ No models were successfully evaluated")
+
+# 🏆 Optional: Hyperparameter tuning for top model
+if results and len(results) > 0:
+    top_model_name = results_df.iloc[0]['Model']
+    print(f"\n=== Hyperparameter Tuning for {top_model_name} ===")
+    
+    if top_model_name == "Random Forest":
+        param_grid = {
+            'classifier__n_estimators': [100, 200],
+            'classifier__max_depth': [10, 20, None],
+            'classifier__min_samples_split': [2, 5],
+            'classifier__min_samples_leaf': [1, 2]
+        }
+    elif top_model_name == "XGBoost":
+        param_grid = {
+            'classifier__n_estimators': [100, 200],
+            'classifier__learning_rate': [0.01, 0.1],
+            'classifier__max_depth': [3, 6],
+            'classifier__subsample': [0.8, 1.0]
+        }
+    else:  # Default grid for other models
+        param_grid = {
+            'classifier__n_estimators': [100, 200],
+            'classifier__learning_rate': [0.01, 0.1]
+        }
+    
+    try:
+        grid_search = GridSearchCV(
+            best_models[top_model_name],
+            param_grid,
+            cv=cv,
+            scoring='roc_auc',
+            n_jobs=-1,
+            verbose=1
+        )
+        grid_search.fit(X_train, y_train)
+        
+        print(f"\nBest parameters: {grid_search.best_params_}")
+        print(f"Best CV ROC-AUC: {grid_search.best_score_:.4f}")
+        
+        # Evaluate tuned model
+        y_pred_tuned = grid_search.predict(X_test)
+        y_proba_tuned = grid_search.predict_proba(X_test)[:, 1]
+        
+        print("\n=== Tuned Model Performance ===")
+        print(f"ROC-AUC: {roc_auc_score(y_test, y_proba_tuned):.4f}")
+        print(classification_report(y_test, y_pred_tuned))
+        
+    except Exception as e:
+        print(f"Error during tuning: {e}")
+
+# 💾 Save best model
+if results and len(results) > 0:
+    best_model_name = results_df.iloc[0]['Model']
+    best_pipeline = best_models[best_model_name]
+    
+    try:
+        import joblib
+        joblib.dump(best_pipeline, 'best_churn_model.pkl')
+        print(f"\n✅ Saved best model ({best_model_name}) to best_churn_model.pkl")
+    except Exception as e:
+        print(f"Error saving model: {e}")
